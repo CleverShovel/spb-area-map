@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Район поиска квартиры, СПб</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css">
+<style>
+  html, body { height: 100%; margin: 0; font: 14px/1.4 system-ui, sans-serif; color: #1d2733; }
+  #app { display: grid; grid-template-columns: 300px 1fr; height: 100%; }
+  aside { padding: 16px; overflow-y: auto; border-right: 1px solid #d7dde4; background: #f6f8fa; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  p { margin: 0 0 12px; color: #55606c; }
+  select, input, button { font: inherit; padding: 7px 10px; border: 1px solid #b9c2cc; border-radius: 6px; background: #fff; }
+  button { cursor: pointer; }
+  button:hover { background: #eef2f6; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+  .row input { flex: 1; min-width: 0; }
+  .zone { background: #fff; border: 1px solid #d7dde4; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px;
+          display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .zone b { display: block; }
+  .zone small { color: #55606c; }
+  #total { margin: 12px 0; font-weight: 600; }
+  #map { height: 100%; }
+  @media (max-width: 700px) { #app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; } aside { max-height: 40%; border-right: 0; border-bottom: 1px solid #d7dde4; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <h1>Где искать квартиру</h1>
+    <p>Выберите инструмент справа на карте (многоугольник, прямоугольник, круг) и обведите нужную область. Можно добавить несколько областей.</p>
+    <div class="row">
+      <input id="q" placeholder="Найти адрес или станцию метро" aria-label="Поиск адреса">
+      <button id="go">Найти</button>
+    </div>
+    <p style="margin-bottom:6px"><b>Проверить адрес</b></p>
+    <div class="row">
+      <input id="addr" placeholder="Например, Лиговский проспект 50" aria-label="Адрес для проверки">
+      <button id="chk">Проверить</button>
+    </div>
+    <p id="addrRes" style="font-size:12px;font-weight:600"></p>
+    <p style="margin-bottom:6px"><b>Вокруг станции метро</b></p>
+    <div class="row">
+      <input id="st" list="stlist" placeholder="Станция, например Чёрная речка" aria-label="Станция метро">
+      <datalist id="stlist"></datalist>
+    </div>
+    <div class="row">
+      <select id="rad" aria-label="Радиус">
+        <option value="500">500 м</option>
+        <option value="1000" selected>1 км</option>
+        <option value="1500">1,5 км</option>
+        <option value="2000">2 км</option>
+        <option value="3000">3 км</option>
+      </select>
+      <button id="addst">Добавить область</button>
+    </div>
+    <p id="stmsg" style="font-size:12px">Загружаю станции…</p>
+    <p style="margin:12px 0 6px"><b>Время в пути до метро «Московские ворота»</b></p>
+    <div class="row">
+      <label for="lim" style="align-self:center">До</label>
+      <select id="lim">
+        <option value="15">15 мин</option>
+        <option value="20">20 мин</option>
+        <option value="25">25 мин</option>
+        <option value="30" selected>30 мин</option>
+        <option value="40">40 мин</option>
+      </select>
+      <button id="showReach">Показать</button>
+    </div>
+    <div class="row">
+      <select id="reachRad" aria-label="Радиус кругов">
+        <option value="500">500 м</option>
+        <option value="1000" selected>1 км</option>
+        <option value="1500">1,5 км</option>
+      </select>
+      <button id="reachCircles">Круги вокруг этих станций</button>
+    </div>
+    <p id="reachMsg" style="font-size:12px">Время оценочное: 2,2 мин на перегон и 3 мин на пересадку.</p>
+    <div id="zones"></div>
+    <div id="total"></div>
+    <div class="row">
+      <button id="copy">Копировать GeoJSON</button>
+      <button id="clear">Очистить всё</button>
+      <button id="reset" title="Вернуть исходную зону">Исходная зона</button>
+    </div>
+    <p id="msg"></p>
+  </aside>
+  <div id="map"></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script>
+  var KEY = 'spb-search-areas';
+  var map = L.map('map').setView([59.9343, 30.3351], 11);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '© OpenStreetMap'
+  }).addTo(map);
+
+  var layers = new L.FeatureGroup().addTo(map);
+  map.addControl(new L.Control.Draw({
+    edit: { featureGroup: layers },
+    draw: { polygon: { allowIntersection: false, showArea: true }, rectangle: {}, circle: {}, polyline: false, marker: false, circlemarker: false }
+  }));
+
+  var BASE = { color: '#d6336c', weight: 3, fillOpacity: 0.2 }, HOVER = { color: '#a61e4d', weight: 4, fillOpacity: 0.4 };
+  function zoneIndex(layer) { var i = 0, n = 0; layers.eachLayer(function (l) { i++; if (l === layer) n = i; }); return n; }
+  function removeZone(layer) { layers.removeLayer(layer); render(); }
+  layers.on('layeradd', function (e) {
+    var l = e.layer;
+    l.on('mouseover', function () {
+      l.setStyle(HOVER);
+      l.bindTooltip('Область ' + zoneIndex(l) + ', ' + areaKm2(l).toFixed(1) + ' км². Нажмите, чтобы удалить', { sticky: true }).openTooltip();
+    });
+    l.on('mouseout', function () { l.setStyle(BASE); l.unbindTooltip(); });
+    l.on('click', function (ev) {
+      var box = document.createElement('div');
+      box.innerHTML = '<b>Область ' + zoneIndex(l) + '</b><br>' + areaKm2(l).toFixed(1) + ' км²<br><br><button>Удалить область</button>';
+      box.querySelector('button').onclick = function () { map.closePopup(); removeZone(l); };
+      L.popup().setLatLng(ev.latlng).setContent(box).openOn(map);
+    });
+  });
+
+  function areaKm2(layer) {
+    if (layer instanceof L.Circle) return Math.PI * Math.pow(layer.getRadius(), 2) / 1e6;
+    var pts = layer.getLatLngs()[0], R = 6371008.8, s = 0;
+    for (var i = 0; i < pts.length; i++) {
+      var a = pts[i], b = pts[(i + 1) % pts.length];
+      s += (b.lng - a.lng) * Math.PI / 180 * (2 + Math.sin(a.lat * Math.PI / 180) + Math.sin(b.lat * Math.PI / 180));
+    }
+    return Math.abs(s * R * R / 2) / 1e6;
+  }
+
+  function toGeoJSON() {
+    var fc = { type: 'FeatureCollection', features: [] };
+    layers.eachLayer(function (l) {
+      var f = l.toGeoJSON();
+      if (l instanceof L.Circle) f.properties.radius = l.getRadius();
+      fc.features.push(f);
+    });
+    return fc;
+  }
+
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(toGeoJSON())); } catch (e) {} }
+
+  function render() {
+    var box = document.getElementById('zones'), total = 0, i = 0;
+    box.innerHTML = '';
+    layers.eachLayer(function (l) {
+      i++;
+      var km = areaKm2(l); total += km;
+      var d = document.createElement('div'); d.className = 'zone';
+      d.innerHTML = '<div><b>Область ' + i + '</b><small>' + km.toFixed(1) + ' км²</small></div><span style="display:flex;gap:4px"><button class="show">Показать</button><button class="del" title="Удалить область" aria-label="Удалить область">✕</button></span>';
+      d.querySelector('.show').onclick = function () { map.fitBounds(l.getBounds()); };
+      d.querySelector('.del').onclick = function () { removeZone(l); };
+      d.onmouseenter = function () { l.setStyle(HOVER); };
+      d.onmouseleave = function () { l.setStyle(BASE); };
+      box.appendChild(d);
+    });
+    document.getElementById('total').textContent = i ? 'Всего: ' + total.toFixed(1) + ' км²' : 'Областей пока нет.';
+    save();
+  }
+
+  map.on(L.Draw.Event.CREATED, function (e) {
+    e.layer.setStyle && e.layer.setStyle({ color: '#d6336c', weight: 3, fillOpacity: 0.2 });
+    layers.addLayer(e.layer); render();
+  });
+  map.on(L.Draw.Event.EDITED, render);
+  map.on(L.Draw.Event.DELETED, render);
+
+  function loadGeo(geo) {
+    L.geoJSON(geo, {
+      pointToLayer: function (f, ll) { return L.circle(ll, { radius: f.properties.radius }); },
+      onEachFeature: function (f, l) { l.setStyle(BASE); layers.addLayer(l); }
+    });
+    if (layers.getLayers().length) map.fitBounds(layers.getBounds());
+    render();
+  }
+  function loadDefault() {
+    return fetch('default-zone.json').then(function (r) { return r.json(); }).then(loadGeo)
+      .catch(function () { render(); msg('Не удалось загрузить исходную зону.'); });
+  }
+  var saved = null;
+  try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) {}
+  if (saved) loadGeo(saved); else loadDefault();
+
+  // Проверка адреса: попадает ли точка в одну из областей
+  function inPolygon(pt, ring) {
+    var inside = false;
+    for (var i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      var a = ring[i], b = ring[j];
+      if ((a.lat > pt.lat) !== (b.lat > pt.lat) && pt.lng < (b.lng - a.lng) * (pt.lat - a.lat) / (b.lat - a.lat) + a.lng) inside = !inside;
+    }
+    return inside;
+  }
+  function insideZones(ll) {
+    var hit = [], i = 0;
+    layers.eachLayer(function (l) {
+      i++;
+      var ok = l instanceof L.Circle ? map.distance(ll, l.getLatLng()) <= l.getRadius() : inPolygon(ll, l.getLatLngs()[0]);
+      if (ok) hit.push(i);
+    });
+    return hit;
+  }
+  var checkMarker = null;
+  function checkAddress() {
+    var q = document.getElementById('addr').value.trim(), out = document.getElementById('addrRes');
+    if (!q) return;
+    out.textContent = 'Ищу адрес…';
+    fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ru&viewbox=29.4,60.2,30.8,59.6&q=' + encodeURIComponent(/петербург/i.test(q) ? q : q + ', Санкт-Петербург'))
+      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (!r[0]) { out.textContent = 'Адрес не найден. Попробуйте записать иначе: улица, дом.'; return; }
+        var ll = L.latLng(+r[0].lat, +r[0].lon), hit = insideZones(ll);
+        if (checkMarker) map.removeLayer(checkMarker);
+        checkMarker = L.circleMarker(ll, { radius: 9, color: '#fff', weight: 2, fillColor: hit.length ? '#2a9d4b' : '#c92a2a', fillOpacity: 1 })
+          .bindTooltip(r[0].display_name).addTo(map);
+        map.setView(ll, Math.max(map.getZoom(), 14));
+        out.textContent = (hit.length ? '✔ Внутри зоны (область ' + hit.join(', ') + '). ' : '✘ Вне зоны. ') + r[0].display_name;
+        out.style.color = hit.length ? '#1e7a3a' : '#c92a2a';
+      })
+      .catch(function () { out.textContent = 'Поиск не сработал, проверьте интернет.'; out.style.color = ''; });
+  }
+  document.getElementById('chk').onclick = checkAddress;
+  document.getElementById('addr').onkeydown = function (e) { if (e.key === 'Enter') checkAddress(); };
+  document.getElementById('reset').onclick = function () { layers.clearLayers(); loadDefault(); };
+
+  // Станции метро: список берётся из OpenStreetMap через Overpass
+  var stations = {};
+  function addAround(name) {
+    var s = stations[name]; if (!s) return false;
+    var r = +document.getElementById('rad').value;
+    var c = L.circle([s.lat, s.lon], { radius: r, color: '#d6336c', weight: 3, fillOpacity: 0.2 });
+    layers.addLayer(c); render(); map.fitBounds(c.getBounds());
+    return true;
+  }
+  window.addAround = addAround;
+  function useStations(d) {
+    Object.keys(d).forEach(function (n) { if (!stations[n]) stations[n] = d[n]; });
+    var names = Object.keys(stations).sort(), dl = document.getElementById('stlist');
+    names.forEach(function (n) {
+      var o = document.createElement('option'); o.value = n; dl.appendChild(o);
+      markers[n] = L.circleMarker([stations[n].lat, stations[n].lon], { radius: 5, color: '#fff', weight: 1.5, fillColor: '#1c6fd1', fillOpacity: 1 })
+        .bindTooltip(n).addTo(map)
+        .on('click', function () { document.getElementById('st').value = n; });
+    });
+    document.getElementById('stmsg').textContent = 'Станций на карте: ' + names.length + '. Выберите станцию в списке или нажмите на синюю точку, затем радиус.';
+  }
+
+  // Схема метро: порядок станций по линиям (по данным 2026 года, без станций, которых нет на схеме)
+  var markers = {};
+  var LINES = {
+    1: ['Девяткино','Гражданский проспект','Академическая','Политехническая','Площадь Мужества','Лесная','Выборгская','Площадь Ленина','Чернышевская','Площадь Восстания','Владимирская','Пушкинская','Технологический институт','Балтийская','Нарвская','Кировский завод','Автово','Ленинский проспект','Проспект Ветеранов'],
+    2: ['Парнас','Проспект Просвещения','Озерки','Удельная','Пионерская','Чёрная речка','Петроградская','Горьковская','Невский проспект','Сенная площадь','Технологический институт','Фрунзенская','Московские ворота','Электросила','Парк Победы','Московская','Звёздная','Купчино'],
+    3: ['Беговая','Зенит','Приморская','Василеостровская','Гостиный двор','Маяковская','Площадь Александра Невского','Елизаровская','Ломоносовская','Пролетарская','Обухово','Рыбацкое'],
+    4: ['Спасская','Достоевская','Лиговский проспект','Площадь Александра Невского','Новочеркасская','Ладожская','Проспект Большевиков','Улица Дыбенко'],
+    5: ['Комендантский проспект','Старая Деревня','Крестовский остров','Чкаловская','Спортивная','Адмиралтейская','Садовая','Звенигородская','Обводный канал','Волковская','Бухарестская','Международная','Проспект Славы','Дунайская','Шушары']
+  };
+  // пересадки между разными станциями (пешком по переходу)
+  var LINKS = [['Невский проспект','Гостиный двор'],['Сенная площадь','Садовая'],['Сенная площадь','Спасская'],['Садовая','Спасская'],
+    ['Площадь Восстания','Маяковская'],['Владимирская','Достоевская'],['Пушкинская','Звенигородская']];
+  var HOP = 2.2, XFER = 3;
+
+  function travelTimes(start, startLine) {
+    var g = {};
+    function edge(a, b, w) { (g[a] = g[a] || []).push([b, w]); (g[b] = g[b] || []).push([a, w]); }
+    var lineOf = {};
+    Object.keys(LINES).forEach(function (l) {
+      LINES[l].forEach(function (n, i) {
+        (lineOf[n] = lineOf[n] || []).push(l);
+        if (i) edge(LINES[l][i - 1] + '|' + l, n + '|' + l, HOP);
+      });
+    });
+    Object.keys(lineOf).forEach(function (n) {
+      var ls = lineOf[n];
+      for (var i = 0; i < ls.length; i++) for (var j = i + 1; j < ls.length; j++) edge(n + '|' + ls[i], n + '|' + ls[j], XFER);
+    });
+    LINKS.forEach(function (p) {
+      lineOf[p[0]].forEach(function (a) { lineOf[p[1]].forEach(function (b) { edge(p[0] + '|' + a, p[1] + '|' + b, XFER + 1); }); });
+    });
+    var dist = {}; dist[start + '|' + startLine] = 0;
+    var q = [start + '|' + startLine];
+    while (q.length) {
+      q.sort(function (a, b) { return dist[a] - dist[b]; });
+      var u = q.shift();
+      (g[u] || []).forEach(function (e) {
+        var nd = dist[u] + e[1];
+        if (dist[e[0]] === undefined || nd < dist[e[0]]) { dist[e[0]] = nd; q.push(e[0]); }
+      });
+    }
+    var best = {};
+    Object.keys(dist).forEach(function (k) {
+      var n = k.split('|')[0];
+      if (best[n] === undefined || dist[k] < best[n]) best[n] = dist[k];
+    });
+    return best;
+  }
+
+  var reachNames = [];
+  function showReach() {
+    var lim = +document.getElementById('lim').value, t = travelTimes('Московские ворота', 2);
+    reachNames = [];
+    Object.keys(markers).forEach(function (n) {
+      var m = markers[n], ok = t[n] !== undefined && t[n] <= lim;
+      m.setStyle({ fillColor: ok ? '#2a9d4b' : '#9aa5b1', radius: ok ? 7 : 4 });
+      m.setTooltipContent(n + (t[n] !== undefined ? ' — ' + Math.round(t[n]) + ' мин' : ''));
+      if (ok) { reachNames.push(n); m.bringToFront(); }
+    });
+    reachNames.sort(function (a, b) { return t[a] - t[b]; });
+    document.getElementById('reachMsg').textContent = 'Подходит станций: ' + reachNames.length + ' (зелёные точки). ' + reachNames.map(function (n) { return n + ' ' + Math.round(t[n]); }).join(', ');
+  }
+  document.getElementById('showReach').onclick = showReach;
+  document.getElementById('reachCircles').onclick = function () {
+    if (!reachNames.length) showReach();
+    var r = +document.getElementById('reachRad').value;
+    reachNames.forEach(function (n) {
+      layers.addLayer(L.circle([stations[n].lat, stations[n].lon], { radius: r, color: '#d6336c', weight: 3, fillOpacity: 0.2 }));
+    });
+    render(); map.fitBounds(layers.getBounds());
+  };
+  function loadStations() {
+    fetch('stations.json').then(function (r) { return r.json(); }).then(useStations).catch(loadOverpass);
+  }
+  function loadOverpass() {
+    var q = '[out:json][timeout:25];(node["station"="subway"](59.6,29.4,60.2,30.8);node["railway"="station"]["subway"="yes"](59.6,29.4,60.2,30.8););out;';
+    var urls = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+    function attempt(i) {
+      if (i >= urls.length) { document.getElementById('stmsg').textContent = 'Не удалось загрузить станции. Рисуйте область вручную.'; return; }
+      fetch(urls[i], { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          d.elements.forEach(function (e) { var n = e.tags && e.tags.name; if (n && !stations[n]) stations[n] = e; });
+          var names = Object.keys(stations).sort(), dl = document.getElementById('stlist');
+          names.forEach(function (n) {
+            var o = document.createElement('option'); o.value = n; dl.appendChild(o);
+            L.circleMarker([stations[n].lat, stations[n].lon], { radius: 5, color: '#fff', weight: 1.5, fillColor: '#1c6fd1', fillOpacity: 1 })
+              .bindTooltip(n).addTo(map)
+              .on('click', function () { document.getElementById('st').value = n; });
+          });
+          document.getElementById('stmsg').textContent = 'Станций на карте: ' + names.length + '. Выберите станцию в списке или нажмите на синюю точку, затем радиус.';
+        })
+        .catch(function () { attempt(i + 1); });
+    }
+    attempt(0);
+  }
+  loadStations();
+  document.getElementById('addst').onclick = function () {
+    var n = document.getElementById('st').value.trim();
+    if (!addAround(n)) document.getElementById('stmsg').textContent = 'Такой станции нет в списке. Выберите из подсказок.';
+  };
+
+  function search() {
+    var q = document.getElementById('q').value.trim(); if (!q) return;
+    fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&viewbox=29.4,60.2,30.8,59.6&q=' + encodeURIComponent(q + ', Санкт-Петербург'))
+      .then(function (r) { return r.json(); })
+      .then(function (r) { if (r[0]) map.setView([r[0].lat, r[0].lon], 15); else msg('Ничего не найдено.'); })
+      .catch(function () { msg('Поиск не сработал, проверьте интернет.'); });
+  }
+  function msg(t) { document.getElementById('msg').textContent = t; }
+  document.getElementById('go').onclick = search;
+  document.getElementById('q').onkeydown = function (e) { if (e.key === 'Enter') search(); };
+  document.getElementById('clear').onclick = function () { layers.clearLayers(); render(); };
+  document.getElementById('copy').onclick = function () {
+    var t = JSON.stringify(toGeoJSON());
+    (navigator.clipboard ? navigator.clipboard.writeText(t) : Promise.reject()).then(
+      function () { msg('GeoJSON скопирован.'); }, function () { msg('Не удалось скопировать.'); });
+  };
+</script>
+</body>
+</html>
